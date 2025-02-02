@@ -1,0 +1,329 @@
+---
+title: "single cell analysis"
+author: "MWHC"
+date: "21/10/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+require(Seurat)
+require(dplyr)
+```
+
+```{r}
+count = read.table("GSE156234_aggregated_raw_counts.tsv", sep = "\t")
+
+seurat = CreateSeuratObject(counts = count,
+                                          project = "peritoneal wash", min.cells = 3,
+                                          min.features = 200,
+                                          #meta.data = data1.metadata
+                                          )
+rm(count)
+```
+
+```{r}
+#seurat[["percent.mt"]] = PercentageFeatureSet(seurat, pattern="^MT-")
+
+#VlnPlot(seurat, features = c("percent.mt"), pt.size = 0) # all 0
+```
+
+```{r, warning=FALSE, message=FALSE}
+seurat = SCTransform(seurat, verbose = FALSE)
+seurat = RunPCA(seurat, verbose = FALSE)
+seurat = RunUMAP(seurat, dims = 1:40, verbose = FALSE)
+seurat = FindNeighbors(seurat, dims=1:40)
+seurat = FindClusters(seurat, resolution=0.4)
+DimPlot(seurat)
+```
+
+##SingleR Annotiations
+To unbiasedly identify resident peritoneal cells present in the dataset, SingleR (v1.0.5) was employed. Briefly, SingleR infers the origin of each individual cell by referencing transcriptomic datasets of pure cell types. We utilized the ImmGen database, which contains normalized expression values for immune cells from 830 murine microarrays to ID our peritoneal cell types. 
+
+```{r SingleR}
+library(SingleR)
+
+immgen.se <- ImmGenData()
+```
+
+```{r}
+#Label Cells with Main Categories in ImmGen Database
+counts <- GetAssayData(seurat)
+pred.integrated <- SingleR(test = counts, ref = immgen.se, labels = immgen.se$label.main)
+Main.labels <- table(pred.integrated$labels)
+all.markers <- metadata(pred.integrated)$de.genes
+```
+
+```{r}
+#Label Seurat object with SingleR annotations
+to.remove <- pruneScores(pred.integrated)
+summary(to.remove)
+seurat[["SingleR.labels"]] <- pred.integrated$labels
+DimPlot(seurat, group.by = "SingleR.labels", cols = c("royalblue", "forestgreen", "darkolivegreen3", "deepskyblue3", "gray", "navy", "orchid", "darkorchid4", "firebrick", "goldenrod", "azure4", "black", "darkgoldenrod4", "olivedrab1",  "tan2", "azure3", "forestgreen", "salmon"))
+SingleR_markers <- metadata(pred.integrated)$de.genes
+#Create Heatmap based on SingleR classifications
+plotScoreHeatmap(pred.integrated)
+```
+
+```{r all Macrophage markers}
+
+macrophage.markers = FindMarkers(seurat,
+                                 ident.1 = "Macrophages",
+                                 group.by = "SingleR.labels", 
+                         assay = "RNA",
+                         slot = "counts",
+                         test.use = "negbinom")
+
+macrophage.markers$gene = rownames(macrophage.markers)
+
+macrophage.markers = macrophage.markers[macrophage.markers$avg_logFC > 0, ]
+
+```
+
+```{r WT Macrophage markers}
+
+condition = sapply(strsplit(colnames(seurat), "_", ), `[`, 2)
+seurat$condition = factor(condition)
+
+WT.macrophage.markers = FindMarkers(seurat[,seurat$condition == "1"],
+                                 ident.1 = "Macrophages",
+                                 group.by = "SingleR.labels", 
+                         assay = "RNA",
+                         slot = "counts",
+                         test.use = "negbinom")
+
+WT.macrophage.markers$gene = rownames(WT.macrophage.markers)
+
+WT.macrophage.markers = WT.macrophage.markers[WT.macrophage.markers$avg_logFC > 0, ]
+
+write.csv(WT.macrophage.markers, "WT_macrophage_749_markers.csv", row.names = FALSE)
+
+```
+
+```{r WT T cell markers}
+
+WT.Tcell.markers = FindMarkers(seurat[,seurat$condition == "1"],
+                                 ident.1 = "T cells",
+                                 group.by = "SingleR.labels", 
+                         assay = "RNA",
+                         slot = "counts",
+                         test.use = "negbinom")
+
+WT.Tcell.markers$gene = rownames(WT.Tcell.markers)
+
+WT.Tcell.markers = WT.Tcell.markers[WT.Tcell.markers$avg_logFC > 0, ]
+
+write.csv(WT.Tcell.markers, "WT_Tcell_108_markers.csv", row.names = FALSE)
+
+```
+
+```{r WT B cell markers}
+
+WT.Bcell.markers = FindMarkers(seurat[,seurat$condition == "1"],
+                                 ident.1 = "B cells",
+                                 group.by = "SingleR.labels", 
+                         assay = "RNA",
+                         slot = "counts",
+                         test.use = "negbinom")
+
+WT.Bcell.markers$gene = rownames(WT.Bcell.markers)
+
+WT.Bcell.markers = WT.Bcell.markers[WT.Bcell.markers$avg_logFC > 0, ]
+
+write.csv(WT.Bcell.markers, "WT_Bcell_609_markers.csv", row.names = FALSE)
+
+```
+
+
+
+
+```{r CIBERSORTx reference table}
+#table(immgen.se$label.main)
+#max(immgen.se@assays@data$logcounts)
+
+
+
+count = read.table("GSE156234_aggregated_raw_counts.tsv", sep = "\t")
+count = count[,colnames(count) %in% colnames(seurat)]
+count = count[rowSums(count != 0) > 3,]
+write.table(count, "GSE156234_aggregated_raw_counts_genes_cells_filtered.txt", sep = "\t", quote = FALSE)
+rm(count)
+
+table(seurat$SingleR.labels)
+write.csv(seurat$SingleR.labels, "SingleR_labels.csv")
+
+
+
+# only use WT
+count = GetAssayData(seurat, slot = "counts", assay = "RNA")
+count = count[, grepl("_1", colnames(count), fixed = TRUE)]
+write.table(count, "WTonly_celltype_signature_reference.txt", sep = "\t", quote = FALSE)
+rm(count)
+
+WT_labels = unname(seurat$SingleR.labels[na.omit(match(names(seurat$SingleR.labels), colnames(count)))])
+write.table(WT_labels, "SingleR_WT_labels.txt", sep = "\t", quote = FALSE)
+rm(WT_labels)
+```
+
+```{r CIBERSORTx mixture file GF}
+spf.gf.deg = read.csv("../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/results_annotated_SPF_vs_GF.csv", header = T)
+
+mixture = merge(x = read.table("../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated1.txt"), 
+                y = read.table("../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated2.txt"), 
+                by = "V1", all = TRUE)
+sampleFiles = c("../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated3.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated4.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated5.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated6.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated7.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated8.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/untreated1.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/untreated2.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/untreated3.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/untreated4.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/untreated5.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/untreated6.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/untreated7.txt",
+                "../../RNAseq/SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/untreated8.txt")
+for (file in sampleFiles) {
+  mixture = merge(x = mixture, 
+                y = read.table(file),
+                by = "V1", all = TRUE)
+}
+colnames(mixture) = c("ENSEMBL_ID",
+                      "treated1","treated2","treated3","treated4",
+                      "treated5","treated6","treated7","treated8",
+                      "untreated1","untreated2","untreated3","untreated4",
+                      "untreated5","untreated6","untreated7","untreated8")
+mixture = merge(mixture, spf.gf.deg[,c("ENSEMBL_ID","MOUSE_SYMBOL")], by = "ENSEMBL_ID", all.x = TRUE)
+mixture = mixture[,c(18,2:17)]
+colnames(mixture) = c("GeneSymbol",
+                      "treated1","treated2","treated3","treated4",
+                      "treated5","treated6","treated7","treated8",
+                      "untreated1","untreated2","untreated3","untreated4",
+                      "untreated5","untreated6","untreated7","untreated8")
+
+mixture = unique(mixture)
+
+write.table(mixture, "mixture.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+
+
+
+
+mixture_treated = mixture[,c(1:9)]
+mixture_untreated = mixture[,c(1,10:17)]
+
+write.table(mixture_treated, "mixture_treated.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+write.table(mixture_untreated, "mixture_untreated.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{r CIBERSORTx mixture file MyD88 KO}
+
+mixture.myd = merge(x = read.table("../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/treated1.txt"), 
+                y = read.table("../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/treated2.txt"), 
+                by = "V1", all = TRUE)
+sampleFiles.myd = c("../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/treated3.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/treated4.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/treated5.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/treated6.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/treated7.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/treated8.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/untreated1.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/untreated2.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/untreated3.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/untreated4.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/untreated5.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/untreated6.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/untreated7.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/untreated8.txt")
+for (file in sampleFiles.myd) {
+  mixture.myd = merge(x = mixture.myd, 
+                y = read.table(file),
+                by = "V1", all = TRUE)
+}
+colnames(mixture.myd) = c("ENSEMBL_ID",
+                      "treated1","treated2","treated3","treated4",
+                      "treated5","treated6","treated7","treated8",
+                      "untreated1","untreated2","untreated3","untreated4",
+                      "untreated5","untreated6","untreated7","untreated8")
+mixture.myd = merge(mixture.myd, spf.gf.deg[,c("ENSEMBL_ID","MOUSE_SYMBOL")], by = "ENSEMBL_ID", all.x = TRUE)
+mixture.myd = mixture.myd[,c(18,2:17)]
+colnames(mixture.myd) = c("GeneSymbol",
+                      "treated1","treated2","treated3","treated4",
+                      "treated5","treated6","treated7","treated8",
+                      "untreated1","untreated2","untreated3","untreated4",
+                      "untreated5","untreated6","untreated7","untreated8")
+
+mixture.myd = unique(mixture.myd)
+
+write.table(mixture.myd, "mixture_myd.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+
+
+
+
+mixture.myd_treated = mixture.myd[,c(1:9)]
+mixture.myd_untreated = mixture.myd[,c(1,10:17)]
+
+write.table(mixture.myd_treated, "mixture_myd_treated.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+write.table(mixture.myd_untreated, "mixture_myd_untreated.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+```{r CIBERSORTx mixture file Rag KO}
+
+mixture.rag = merge(x = read.table("../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/treated1.txt"), 
+                y = read.table("../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/treated2.txt"), 
+                by = "V1", all = TRUE)
+sampleFiles.rag = c("../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/treated3.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/treated4.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/treated5.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/treated6.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/treated7.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/treated8.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/untreated1.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/untreated2.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/untreated3.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/untreated4.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/untreated5.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/untreated6.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/untreated7.txt",
+                "../../RNAseq/WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/untreated8.txt")
+for (file in sampleFiles.rag) {
+  mixture.rag = merge(x = mixture.rag, 
+                y = read.table(file),
+                by = "V1", all = TRUE)
+}
+colnames(mixture.rag) = c("ENSEMBL_ID",
+                      "treated1","treated2","treated3","treated4",
+                      "treated5","treated6","treated7","treated8",
+                      "untreated1","untreated2","untreated3","untreated4",
+                      "untreated5","untreated6","untreated7","untreated8")
+mixture.rag = merge(mixture.rag, spf.gf.deg[,c("ENSEMBL_ID","MOUSE_SYMBOL")], by = "ENSEMBL_ID", all.x = TRUE)
+mixture.rag = mixture.rag[,c(18,2:17)]
+colnames(mixture.rag) = c("GeneSymbol",
+                      "treated1","treated2","treated3","treated4",
+                      "treated5","treated6","treated7","treated8",
+                      "untreated1","untreated2","untreated3","untreated4",
+                      "untreated5","untreated6","untreated7","untreated8")
+
+mixture.rag = unique(mixture.rag)
+
+write.table(mixture.rag, "mixture_rag.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+
+
+
+
+
+mixture.rag_treated = mixture.rag[,c(1:9)]
+mixture.rag_untreated = mixture.rag[,c(1,10:17)]
+
+write.table(mixture.rag_treated, "mixture_rag_treated.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+write.table(mixture.rag_untreated, "mixture_rag_untreated.txt", sep = "\t", row.names = FALSE, quote = FALSE)
+```
+
+
+
+
+

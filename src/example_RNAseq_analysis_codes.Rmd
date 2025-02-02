@@ -1,0 +1,174 @@
+---
+title: "example_RNAseq_analysis_codes"
+author: "MWHC"
+date: "17/11/2021"
+output: html_document
+---
+
+```{r libraries}
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+library(ggrepel)
+library(RColorBrewer)
+```
+
+import method depends on the Read Count format (ie. how and what package/method are they derived using)
+Here I have read counts from HTseq
+
+```{r rerun DESeq2 with all data}
+# putting all the file paths into the "sampleFiles" variable, I have 40
+directory<-'../SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/'
+sampleFiles<-paste0('../SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/', grep('treated[0-9]',list.files(directory),value=TRUE))
+sampleFiles = c(sampleFiles, paste0('../WT_KO/DeSeq2/MF_WT_vs_MF_MyD88KO/', grep('treated[0-9]',list.files(directory),value=TRUE)))
+sampleFiles = c(sampleFiles, paste0('../WT_KO/DeSeq2/MF_WT_vs_MF_RAGKO/', grep('^treated[0-9]',list.files(directory),value=TRUE)))
+sampleFiles
+# [1] "../SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated1.txt"     
+# [2] "../SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated2.txt"     
+# [3] "../SPF_GF/DeSeq2/MF_SPF_vs_MF_GF/treated3.txt"     
+# ...
+
+# saving the corresponding condition/genotype into the "sampleCondition" variable, a total of 40
+sampleCondition<-c(rep("GF",each=8),rep("SPF",each=8),
+                   rep("MyD88KO",each=8),rep("WT",each=8),
+                   rep("RAGKO",each=8))
+# merge them into one data frame
+# sampleName can be different as you wish
+sampleTable<-data.frame(sampleName=sampleFiles, fileName=sampleFiles, condition=sampleCondition)
+
+
+
+
+# use the correct import method to create a DESeqDataSet object
+ddsHTSeq<-DESeqDataSetFromHTSeqCount(sampleTable=sampleTable, 
+                                     #directory=directory,
+                                     design=~condition)
+
+# to set "WT" as the baseline (first factor level is automatically considered baseline in DESeq2)
+colData(ddsHTSeq)$condition<-factor(colData(ddsHTSeq)$condition, levels=c('WT',"SPF",'GF',"MyD88KO","RAGKO"))
+# run the differential gene expression analysis
+dds<-DESeq(ddsHTSeq)
+# check what results/comparisons have been done (according to our "design" above)
+resultsNames(dds)
+#[1] "Intercept"               "condition_SPF_vs_WT"     "condition_GF_vs_WT"     
+#[4] "condition_MyD88KO_vs_WT" "condition_RAGKO_vs_WT"  
+
+#select the comparison we want from the resultsNames above
+# the following means genes with logFC > 0 are overexpressed in SPF
+res<-results(dds, contrast = c("condition","SPF","WT"))
+# reorder by adjusted p-value
+res<-res[order(res$padj),]
+mcols(res,use.names=TRUE)
+# see the final DGEA results data frame
+as.data.frame(res)
+
+
+
+
+# my results are in ENSEMBL, we can get the gene names using biomart
+# it also works with eg. entrez gene ID, check here:
+# https://bioconductor.org/packages/release/bioc/html/biomaRt.html
+mart <- useDataset("mmusculus_gene_ensembl", useMart("ensembl"))
+# for human it's obviously hsapiens_gene_ensembl, you can check the available organism dataset through "listDatasets(useMart("ensembl"))"
+gene_IDs <- getBM(filters = "ensembl_gene_id", 
+                  attributes= c("ensembl_gene_id","external_gene_name"),
+                  values = rownames(), mart= mart)
+# you choose your source info (filters) and target info (attributes) here, according to the organism
+# values should match your chosen filter, here my rownames(res) gives ensembl gene id
+# all available filters can be checked by listFilters(mart)
+# all available attributes can be checked by listAttributes(mart)
+# eg. for human, gene symbols are called "hgnc_symbol"
+
+# match the gene symbols in gene_IDs to my res data frame
+res$ENSEMBL_ID <- rownames(res_df)
+res <- left_join(res, gene_IDs, by = c("ENSEMBL_ID"="ensembl_gene_id"))
+# you can save this as a csv file
+write.csv(res, "./DGEA_results/res.csv", row.names = F)
+
+```
+
+Do a PCA plot to show similarity between samples
+
+```{r integrated PCA}
+ddsMat_rlog <- rlog(dds,blind = FALSE)
+ddsMat_rlog$sample = rownames(ddsMat_rlog@colData)
+plotPCA(ddsMat_rlog, 
+        #intgroup = "sample", 
+        #ntop = 500
+        ) + theme_bw() + geom_point(size = 3) + 
+  scale_y_continuous(limits = c(-25, 25)) + 
+  scale_color_manual(values=c("#29A2C6", "#FF6D31", "#73B66B", "#FFCB18", "#EF597B")) +
+  ggtitle(label = "Principal Component Analysis (PCA)", 
+          #subtitle = "Top 200 most variable genes"
+          ) + 
+  #geom_text_repel(aes(label = name), point.padding = 0.5
+ggsave("pca_unstim.png", width = 5, height = 5, dpi = 300)
+dev.off()
+```
+
+do enrichment analysis on differentially expressed genes using various databases
+one option is to use the enrichR package
+
+```{r enrichment}
+library(enrichR)
+#listEnrichrSites()
+#setEnrichrSite("Enrichr") # human or mouse genes
+#websiteLive <- TRUE
+#dbs <- listEnrichrDbs()
+#if (is.null(dbs)) websiteLive <- FALSE
+#if (websiteLive) head(dbs)
+dbs <- c("Reactome_2022","ChEA_2022", "KEGG_2019_Mouse","UK_Biobank_GWAS_v1", 
+         "GO_Molecular_Function_2021", "GO_Cellular_Component_2021", "GO_Biological_Process_2021")
+# these are my chosen most updated databases for pathways and TF regulations
+
+#get gene list of interest, eg. upregulated
+up.genes = res %>% drop_na(padj) %>% filter(padj < 0.05) %>% filter(log2FoldChange > 0) %>% select(gene_symbol) %>% unlist()
+
+enriched.up.genes <- enrichr(up.genes, dbs)
+head(enriched.up.genes[["ChEA_2022"]])
+head(enriched.up.genes[["Reactome_2022"]])
+head(enriched.up.genes[["KEGG_2019_Mouse"]])
+head(enriched.up.genes[["UK_Biobank_GWAS_v1"]])
+head(enriched.up.genes[["GO_Molecular_Function_2021"]])
+head(enriched.up.genes[["GO_Cellular_Component_2021"]])
+head(enriched.up.genes[["GO_Biological_Process_2021"]])
+
+# you can export these results as you wish, make plots etc.
+
+```
+
+one visualisation is to overlay DEG log fold changes onto an enriched KEGG pathway
+we can use pathview
+
+```{r pathview}
+library(pathview)
+
+#tutorial/demo
+#data(gse16873.d)
+#data(demo.paths)
+
+# here we need entrez ID instead of ensembl ID or gene symbol
+res_entrez <- getBM(filters = "ensembl_gene_id", 
+                  attributes= c("ensembl_gene_id","entrezgene_id"),
+                  values = res$ENSEMBL_ID, 
+                  mart= useDataset("mmusculus_gene_ensembl", useMart("ensembl")))
+
+res_entrez <- left_join(res, 
+                        res_entrez,
+                        by = c("ENSEMBL_ID"="ensembl_gene_id"))
+res_entrez = na.omit(res_entrez)
+res_entrez_pathview = res_entrez$log2FoldChange
+names(res_entrez_pathview) = res_entrez$entrezgene_id
+
+# for example here is the KEGG ID of lysosome pathway
+#04142 lysosome
+pv.out <- pathview(gene.data = res_entrez_pathview, 
+                   pathway.id = "04142",
+                   species = "mmu", # human is "hsa"
+                   out.suffix = "DKO_M2mo.overlay", 
+                   kegg.native = T,
+                   same.layer = F, )
+
+# this should output the graph directly to your working directory
+```
+
