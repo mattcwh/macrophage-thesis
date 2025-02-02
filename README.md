@@ -11,3 +11,10 @@ This repository contains some example codes to demonstrate the work I have done 
 I have a lot more experience writing codes for creative analysis and visualisation in my full-time job as a Bioinformatician at Sonrai Analytics.
 
 * Matthew Chung [Email](m.chung@sonraianalytics.com) and [LinkedIn](linkedin.com/in/mattwhchung)
+
+### Showcases
+
+This is irrelevant to the thesis, but if you're interested, I have analysed single-cell RNAseq data and produced interactive R Shiny Apps visualisations during my PhD for other labs.
+
+* [Developing mouse pancreas](https://singlecellmatt.shinyapps.io/sneddonviz/)
+* [Drosophila midgut development](https://singlecellmatt.shinyapps.io/DmelMidgutViz/)
